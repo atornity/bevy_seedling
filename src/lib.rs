@@ -13,6 +13,7 @@ pub mod activity;
 pub mod bpf;
 pub mod context;
 pub mod lpf;
+pub mod music;
 pub mod node;
 pub mod node_label;
 pub mod sample;
@@ -142,6 +143,7 @@ impl Plugin for SeedlingPlugin {
             .register_params_node::<lpf::LowPassNode>()
             .register_params_node::<bpf::BandPassNode>()
             .register_params_node::<VolumeNode>()
+            .register_params_node::<music::MusicNode>()
             .register_node::<MixNode>()
             .register_node::<SamplerNode>()
             .configure_sets(
@@ -158,6 +160,7 @@ impl Plugin for SeedlingPlugin {
             .add_systems(
                 Last,
                 (
+                    music::insert_music_nodes.before(SeedlingSystems::Acquire),
                     node::auto_connect
                         .before(SeedlingSystems::Connect)
                         .after(SeedlingSystems::Acquire),

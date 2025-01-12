@@ -20,6 +20,22 @@ pub fn derive_param_inner(
         ));
     };
 
+    let filter_skipped = |field: &&syn::Field| {
+        field.attrs.iter().any(|attr| {
+            let mut skip = false;
+
+            if attr.path().is_ident("param") {
+                let _ = attr.parse_nested_meta(|meta| {
+                    skip = meta.path.is_ident("skip");
+
+                    Ok(())
+                });
+            }
+
+            !skip
+        })
+    };
+
     // NOTE: a trivial optimization would be to automatically
     // flatten structs with only a single field so their
     // paths can be one index shorter.
@@ -27,11 +43,13 @@ pub fn derive_param_inner(
         syn::Fields::Named(fields) => fields
             .named
             .iter()
+            .filter(filter_skipped)
             .map(|f| (f.ident.as_ref().unwrap().to_token_stream(), &f.ty))
             .collect(),
         syn::Fields::Unnamed(fields) => fields
             .unnamed
             .iter()
+            .filter(filter_skipped)
             .enumerate()
             .map(|(i, f)| {
                 let accessor: syn::Index = i.into();

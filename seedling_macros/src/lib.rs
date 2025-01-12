@@ -19,7 +19,7 @@ pub fn derive_pool_label(input: TokenStream) -> TokenStream {
         .into()
 }
 
-#[proc_macro_derive(AudioParam)]
+#[proc_macro_derive(AudioParam, attributes(param))]
 pub fn derive_audio_param(input: TokenStream) -> TokenStream {
     param::derive_param_inner(input, quote::quote! { ::bevy_seedling::firewheel })
         .unwrap_or_else(syn::Error::into_compile_error)
