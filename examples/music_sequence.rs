@@ -27,8 +27,8 @@ fn play_music(server: Res<AssetServer>, mut commands: Commands) {
     let jump_label = Label(0);
 
     commands.spawn(
-        MusicNode::build(server.load("quiet-night.wav"))
-            .label(jump_label, ClockSeconds(7.0))
-            .jump(jump_label, ClockSeconds(34.5), ClockSeconds(0.25)),
+        MusicNode::build(server.load("midir.wav"))
+            .label(jump_label, ClockSeconds(11.45))
+            .jump(jump_label, ClockSeconds(70.094), ClockSeconds(0.25)),
     );
 }

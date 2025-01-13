@@ -309,10 +309,13 @@ impl AudioNode for MusicNode {
         stream_info: &firewheel::StreamInfo,
         _: ChannelConfig,
     ) -> Result<Box<dyn firewheel::node::AudioNodeProcessor>, Box<dyn std::error::Error>> {
+        let sample_rate = stream_info.sample_rate.get() as f64;
+
         Ok(Box::new(MusicProcessor {
             params: self.clone(),
-            sample_rate: stream_info.sample_rate.get() as f64,
-            equal_power: EqualPower::new(8),
+            sample_rate,
+            equal_power: EqualPower::new((sample_rate * 0.0125) as usize),
+            crossfading: None,
         }))
     }
 }
@@ -345,16 +348,26 @@ impl EqualPower {
     }
 }
 
+struct Crossfading {
+    from_playhead: ClockSeconds,
+    remaining_samples: usize,
+}
+
 pub struct MusicProcessor {
     params: MusicNode,
     sample_rate: f64,
     equal_power: EqualPower,
+    crossfading: Option<Crossfading>,
 }
 
-fn scan_for_event(range: Range<ClockSeconds>, events: &[SequenceItem]) -> Option<&SequenceItem> {
+fn scan_for_event(
+    range: Range<ClockSeconds>,
+    events: &[SequenceItem],
+    rate: f64,
+) -> Option<&SequenceItem> {
     let mut earliest: Option<&SequenceItem> = None;
     for item in events {
-        if range.contains(&item.timestamp) {
+        if range.contains(&round_to_sample(item.timestamp, rate)) {
             match earliest {
                 Some(e) => {
                     if item.timestamp < e.timestamp {
@@ -373,6 +386,11 @@ fn scan_for_event(range: Range<ClockSeconds>, events: &[SequenceItem]) -> Option
 
 fn time_to_samples(time: ClockSeconds, rate: f64) -> u64 {
     (time.0 * rate).round() as u64
+}
+
+fn round_to_sample(time: ClockSeconds, rate: f64) -> ClockSeconds {
+    let in_samples = time_to_samples(time, rate);
+    ClockSeconds(in_samples as f64 / rate)
 }
 
 impl MusicProcessor {
@@ -401,11 +419,15 @@ impl MusicProcessor {
     fn item_delta(&self, item: &SequenceItem) -> ClockSeconds {
         let playhead = self.params.playhead.get();
 
-        item.timestamp - playhead
+        round_to_sample(item.timestamp, self.sample_rate) - playhead
     }
 
     fn next_event(&self, range: Range<ClockSeconds>) -> Option<&SequenceItem> {
-        scan_for_event(self.sample_range(range), &self.params.sequence)
+        scan_for_event(
+            self.sample_range(range),
+            &self.params.sequence,
+            self.sample_rate,
+        )
     }
 
     fn find_jump_target(&self, label: Label) -> Option<ClockSeconds> {
@@ -416,6 +438,34 @@ impl MusicProcessor {
         }
 
         None
+    }
+
+    fn crossfade(
+        &self,
+        current_time: ClockSeconds,
+        crossfading: &Crossfading,
+        outputs: &mut [&mut [f32]],
+        in_slice: &[f32],
+        scratch: &mut [&mut [f32]],
+        out_slice: &[f32],
+    ) {
+        let current_output_sample = time_to_samples(current_time, self.sample_rate);
+        let fill_range =
+            current_output_sample as usize..current_output_sample as usize + in_slice.len();
+
+        // fade out
+        let start_playhead = time_to_samples(crossfading.from_playhead, self.sample_rate);
+        self.params
+            .music
+            .fill_buffers(scratch, fill_range.clone(), start_playhead);
+
+        // fade in and mix
+        for i in fill_range {
+            for (chann_main, chann_scratch) in outputs.iter_mut().zip(scratch.iter_mut()) {
+                chann_main[i] *= in_slice[i - current_output_sample as usize];
+                chann_main[i] += chann_scratch[i] * out_slice[i - current_output_sample as usize];
+            }
+        }
     }
 }
 
@@ -452,24 +502,76 @@ impl AudioNodeProcessor for MusicProcessor {
                     self.fill_buffers(outputs, current_time, end_time);
                     current_time += self.item_delta(event);
 
+                    let timestamp = round_to_sample(event.timestamp, self.sample_rate);
+
                     match event.data {
                         SequenceData::Jump { target: jump, .. } => {
                             match self.find_jump_target(jump) {
                                 Some(target) => {
-                                    self.params.playhead.set(target);
+                                    self.crossfading = Some(Crossfading {
+                                        from_playhead: timestamp,
+                                        remaining_samples: self.equal_power.frames(),
+                                    });
+
+                                    self.params
+                                        .playhead
+                                        .set(round_to_sample(target, self.sample_rate));
                                 }
                                 None => {
-                                    self.params.playhead.set(event.timestamp);
+                                    self.params
+                                        .playhead
+                                        .set(round_to_sample(timestamp, self.sample_rate));
                                 }
                             }
                         }
                         _ => {
-                            self.params.playhead.set(event.timestamp);
+                            self.params
+                                .playhead
+                                .set(round_to_sample(timestamp, self.sample_rate));
                         }
                     }
                 }
                 None => {
                     self.fill_buffers(outputs, current_time, end_time);
+                    if let Some(crossfading) = &self.crossfading {
+                        let slice_start = self.equal_power.frames() - crossfading.remaining_samples;
+
+                        let total_remaining_frames = time_to_samples(end_time, self.sample_rate)
+                            - time_to_samples(current_time, self.sample_rate);
+
+                        let slice_end = self
+                            .equal_power
+                            .frames()
+                            .min(slice_start + total_remaining_frames as usize);
+
+                        let out_slice = &self.equal_power.a[slice_start..slice_end];
+                        let in_slice = &self.equal_power.b[slice_start..slice_end];
+
+                        self.crossfade(
+                            current_time,
+                            crossfading,
+                            outputs,
+                            in_slice,
+                            proc_info.scratch_buffers,
+                            out_slice,
+                        );
+
+                        let new_remaining_samples = self.equal_power.frames() - slice_end;
+
+                        if new_remaining_samples == 0 {
+                            self.crossfading = None;
+                        } else {
+                            self.crossfading = Some(Crossfading {
+                                from_playhead: crossfading.from_playhead
+                                    + ClockSeconds(
+                                        (crossfading.remaining_samples - new_remaining_samples)
+                                            as f64
+                                            * proc_info.sample_rate_recip,
+                                    ),
+                                remaining_samples: new_remaining_samples,
+                            });
+                        }
+                    }
 
                     let playhead = self.params.playhead.get();
                     self.params.playhead.set(end_time + playhead);

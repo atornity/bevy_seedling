@@ -18,6 +18,7 @@ pub mod node;
 pub mod node_label;
 pub mod sample;
 pub mod saw;
+pub mod shared;
 
 #[cfg(feature = "profiling")]
 pub mod profiling;
