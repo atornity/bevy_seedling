@@ -40,7 +40,7 @@ bevy = { version = "0.16", default-features = false, features = [
 ] }
 bevy_math = { version = "0.16", default-features = false, features = ["curve"] }
 firewheel = { version = "0.4.0", features = ["bevy", "spatial_basic_node"] }
-symphonium = { version = "0.5.0", default-features = false, features = [
+symphonium = { version = "0.5", default-features = false, features = [
   "opt-simd",
   "fft-resampler",
 ] }
